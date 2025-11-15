@@ -1,19 +1,21 @@
 """
 CUSTOMER MANAGEMENT
 
-All /customer management endpoints 
+All /customer management endpoints
 
-/customer/new   
+/customer/new
 /customer/info
 /customer/update
 /customer/delete
+/customer/spend/report
 """
 
 #### END-USER/CUSTOMER MANAGEMENT ####
-from typing import List, Optional
+from datetime import datetime
+from typing import Dict, List, Optional
 
 import fastapi
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 import litellm
 from litellm._logging import verbose_proxy_logger
@@ -666,10 +668,194 @@ async def list_end_user(
         for item in response:
             returned_response.append(LiteLLM_EndUserTable(**item.model_dump()))
         return returned_response
-    
+
     except Exception as e:
         verbose_proxy_logger.exception(
             "litellm.proxy.management_endpoints.customer_endpoints.list_end_user(): Exception occured - {}".format(
+                str(e)
+            )
+        )
+        raise handle_exception_on_proxy(e)
+
+
+@router.get(
+    "/customer/spend/report",
+    tags=["Customer Management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+@router.get(
+    "/end_user/spend/report",
+    tags=["Customer Management"],
+    include_in_schema=False,
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def get_customer_spend_report(
+    http_request: Request,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Start date in YYYY-MM-DD format. If not provided, returns all-time spend.",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="End date in YYYY-MM-DD format. If not provided, uses current date.",
+    ),
+    end_user_id: Optional[str] = fastapi.Query(
+        default=None,
+        description="Filter by specific end user ID. If not provided, returns spend for all end users.",
+    ),
+):
+    """
+    [Admin-only] Get spend report for end users/customers with their aliases.
+
+    This endpoint aggregates spend data from LiteLLM_SpendLogs and joins it with
+    the LiteLLM_EndUserTable to include user aliases.
+
+    Parameters:
+    - start_date: Optional[str] - Start date for the report in YYYY-MM-DD format
+    - end_date: Optional[str] - End date for the report in YYYY-MM-DD format
+    - end_user_id: Optional[str] - Filter by specific end user ID
+
+    Returns:
+    A list of end user spend records with:
+    - user_id: The end user ID
+    - alias: The admin-facing alias for the end user
+    - total_spend: Total spend for the end user
+    - total_requests: Total number of requests
+    - total_tokens: Total tokens used
+    - spend_by_model: Breakdown of spend by model
+
+    Example curl:
+    ```
+    curl --location 'http://0.0.0.0:4000/customer/spend/report?start_date=2024-01-01&end_date=2024-12-31' \
+        --header 'Authorization: Bearer sk-1234'
+    ```
+
+    Example with specific end user:
+    ```
+    curl --location 'http://0.0.0.0:4000/customer/spend/report?end_user_id=user-123' \
+        --header 'Authorization: Bearer sk-1234'
+    ```
+    """
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+
+        # Admin-only check
+        if (
+            user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN
+            and user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "Admin-only endpoint. Your user role={}".format(
+                        user_api_key_dict.user_role
+                    )
+                },
+            )
+
+        if prisma_client is None:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": CommonProxyErrors.db_not_connected_error.value},
+            )
+
+        # Build where conditions for SpendLogs query
+        where_conditions: Dict = {}
+
+        # Filter by end_user_id if provided
+        if end_user_id is not None:
+            where_conditions["end_user"] = end_user_id
+        else:
+            # Only include records that have an end_user set
+            where_conditions["end_user"] = {"not": None}
+
+        # Filter by date range if provided
+        if start_date is not None or end_date is not None:
+            where_conditions["startTime"] = {}
+            if start_date is not None:
+                where_conditions["startTime"]["gte"] = datetime.strptime(
+                    start_date, "%Y-%m-%d"
+                )
+            if end_date is not None:
+                # Set end time to end of day
+                end_datetime = datetime.strptime(end_date, "%Y-%m-%d")
+                end_datetime = end_datetime.replace(hour=23, minute=59, second=59)
+                where_conditions["startTime"]["lte"] = end_datetime
+
+        # Query spend logs
+        spend_logs = await prisma_client.db.litellm_spendlogs.find_many(
+            where=where_conditions
+        )
+
+        # Aggregate spend by end_user
+        spend_by_user: Dict[str, Dict] = {}
+
+        for log in spend_logs:
+            end_user = log.end_user
+            if end_user is None:
+                continue
+
+            if end_user not in spend_by_user:
+                spend_by_user[end_user] = {
+                    "user_id": end_user,
+                    "total_spend": 0.0,
+                    "total_requests": 0,
+                    "total_tokens": 0,
+                    "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                    "spend_by_model": {},
+                }
+
+            spend_by_user[end_user]["total_spend"] += log.spend
+            spend_by_user[end_user]["total_requests"] += 1
+            spend_by_user[end_user]["total_tokens"] += log.total_tokens
+            spend_by_user[end_user]["total_prompt_tokens"] += log.prompt_tokens
+            spend_by_user[end_user]["total_completion_tokens"] += log.completion_tokens
+
+            # Track spend by model
+            model = log.model or "unknown"
+            if model not in spend_by_user[end_user]["spend_by_model"]:
+                spend_by_user[end_user]["spend_by_model"][model] = {
+                    "spend": 0.0,
+                    "requests": 0,
+                    "tokens": 0,
+                }
+
+            spend_by_user[end_user]["spend_by_model"][model]["spend"] += log.spend
+            spend_by_user[end_user]["spend_by_model"][model]["requests"] += 1
+            spend_by_user[end_user]["spend_by_model"][model]["tokens"] += log.total_tokens
+
+        # Fetch end user details to get aliases
+        end_user_ids = list(spend_by_user.keys())
+        end_users = await prisma_client.db.litellm_endusertable.find_many(
+            where={"user_id": {"in": end_user_ids}}
+        )
+
+        # Create a mapping of user_id to alias
+        alias_map = {user.user_id: user.alias for user in end_users}
+
+        # Add aliases to the spend report
+        result = []
+        for user_id, spend_data in spend_by_user.items():
+            spend_data["alias"] = alias_map.get(user_id, None)
+            result.append(spend_data)
+
+        # Sort by total_spend descending
+        result.sort(key=lambda x: x["total_spend"], reverse=True)
+
+        return {
+            "spend_report": result,
+            "total_customers": len(result),
+            "date_range": {
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+        }
+
+    except Exception as e:
+        verbose_proxy_logger.exception(
+            "litellm.proxy.management_endpoints.customer_endpoints.get_customer_spend_report(): Exception occured - {}".format(
                 str(e)
             )
         )

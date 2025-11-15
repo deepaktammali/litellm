@@ -301,3 +301,117 @@ def test_customer_endpoints_error_schema_consistency(mock_prisma_client, mock_us
     for key in ["message", "type", "code"]:
         assert isinstance(error1[key], str), f"error1[{key}] should be a string"
         assert isinstance(error2[key], str), f"error2[{key}] should be a string"
+
+
+def test_customer_spend_report_success(mock_prisma_client, mock_user_api_key_auth):
+    """
+    Test the /customer/spend/report endpoint returns spend data with end user aliases.
+    """
+    from datetime import datetime
+    from unittest.mock import MagicMock
+
+    # Mock spend logs data
+    mock_spend_log_1 = MagicMock()
+    mock_spend_log_1.end_user = "user-1"
+    mock_spend_log_1.spend = 10.5
+    mock_spend_log_1.total_tokens = 1000
+    mock_spend_log_1.prompt_tokens = 600
+    mock_spend_log_1.completion_tokens = 400
+    mock_spend_log_1.model = "gpt-4"
+
+    mock_spend_log_2 = MagicMock()
+    mock_spend_log_2.end_user = "user-1"
+    mock_spend_log_2.spend = 5.25
+    mock_spend_log_2.total_tokens = 500
+    mock_spend_log_2.prompt_tokens = 300
+    mock_spend_log_2.completion_tokens = 200
+    mock_spend_log_2.model = "gpt-3.5-turbo"
+
+    mock_spend_log_3 = MagicMock()
+    mock_spend_log_3.end_user = "user-2"
+    mock_spend_log_3.spend = 20.0
+    mock_spend_log_3.total_tokens = 2000
+    mock_spend_log_3.prompt_tokens = 1200
+    mock_spend_log_3.completion_tokens = 800
+    mock_spend_log_3.model = "gpt-4"
+
+    # Mock the find_many response for spend logs
+    mock_prisma_client.db.litellm_spendlogs.find_many = AsyncMock(
+        return_value=[mock_spend_log_1, mock_spend_log_2, mock_spend_log_3]
+    )
+
+    # Mock end user data with aliases
+    mock_end_user_1 = MagicMock()
+    mock_end_user_1.user_id = "user-1"
+    mock_end_user_1.alias = "Alice"
+
+    mock_end_user_2 = MagicMock()
+    mock_end_user_2.user_id = "user-2"
+    mock_end_user_2.alias = "Bob"
+
+    # Mock the find_many response for end users
+    mock_prisma_client.db.litellm_endusertable.find_many = AsyncMock(
+        return_value=[mock_end_user_1, mock_end_user_2]
+    )
+
+    # Make the request
+    response = client.get(
+        "/customer/spend/report?start_date=2024-01-01&end_date=2024-12-31",
+        headers={"Authorization": "Bearer test-key"},
+    )
+
+    # Assert response
+    assert response.status_code == 200
+    response_json = response.json()
+
+    assert "spend_report" in response_json
+    assert "total_customers" in response_json
+    assert response_json["total_customers"] == 2
+
+    # Check that spend report is sorted by total_spend (descending)
+    spend_report = response_json["spend_report"]
+    assert len(spend_report) == 2
+
+    # User 2 should be first (higher spend: $20.0)
+    assert spend_report[0]["user_id"] == "user-2"
+    assert spend_report[0]["alias"] == "Bob"
+    assert spend_report[0]["total_spend"] == 20.0
+    assert spend_report[0]["total_requests"] == 1
+    assert spend_report[0]["total_tokens"] == 2000
+
+    # User 1 should be second (lower spend: $15.75)
+    assert spend_report[1]["user_id"] == "user-1"
+    assert spend_report[1]["alias"] == "Alice"
+    assert spend_report[1]["total_spend"] == 15.75  # 10.5 + 5.25
+    assert spend_report[1]["total_requests"] == 2
+    assert spend_report[1]["total_tokens"] == 1500  # 1000 + 500
+
+    # Check spend_by_model breakdown for user-1
+    assert "spend_by_model" in spend_report[1]
+    assert "gpt-4" in spend_report[1]["spend_by_model"]
+    assert spend_report[1]["spend_by_model"]["gpt-4"]["spend"] == 10.5
+    assert "gpt-3.5-turbo" in spend_report[1]["spend_by_model"]
+    assert spend_report[1]["spend_by_model"]["gpt-3.5-turbo"]["spend"] == 5.25
+
+
+def test_customer_spend_report_admin_only(mock_prisma_client):
+    """
+    Test that /customer/spend/report endpoint is admin-only.
+    """
+    # Mock non-admin user
+    with patch("litellm.proxy.proxy_server.user_api_key_auth") as mock_auth:
+        mock_auth.return_value = UserAPIKeyAuth(
+            user_id="test-user", user_role=LitellmUserRoles.INTERNAL_USER
+        )
+
+        # Make the request
+        response = client.get(
+            "/customer/spend/report",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+        # Assert response is 401 Unauthorized
+        assert response.status_code == 401
+        response_json = response.json()
+        assert "error" in response_json
+        assert "Admin-only endpoint" in response_json["detail"]["error"]
