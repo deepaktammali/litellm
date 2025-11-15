@@ -12,13 +12,11 @@ import {
   Title,
   Metric,
   Grid,
-  Col,
+  DateRangePicker,
+  DateRangePickerValue,
 } from "@tremor/react";
-import { Spin, DatePicker } from "antd";
+import { Spin } from "antd";
 import { customerSpendReportCall } from "@/components/networking";
-import dayjs, { Dayjs } from "dayjs";
-
-const { RangePicker } = DatePicker;
 
 interface SpendByModel {
   [model: string]: {
@@ -59,10 +57,14 @@ const CustomersSpendPanel: React.FC<CustomersSpendPanelProps> = ({
 }) => {
   const [loading, setLoading] = useState(false);
   const [spendData, setSpendData] = useState<SpendReportData | null>(null);
-  const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null]>([
-    dayjs().subtract(30, "days"),
-    dayjs(),
-  ]);
+
+  // Initialize with last 30 days
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const [dateRange, setDateRange] = useState<DateRangePickerValue>({
+    from: thirtyDaysAgo,
+    to: new Date(),
+  });
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
   const fetchSpendReport = async () => {
@@ -70,8 +72,12 @@ const CustomersSpendPanel: React.FC<CustomersSpendPanelProps> = ({
 
     setLoading(true);
     try {
-      const startDate = dateRange[0]?.format("YYYY-MM-DD");
-      const endDate = dateRange[1]?.format("YYYY-MM-DD");
+      const startDate = dateRange.from
+        ? dateRange.from.toISOString().split("T")[0]
+        : undefined;
+      const endDate = dateRange.to
+        ? dateRange.to.toISOString().split("T")[0]
+        : undefined;
 
       const data = await customerSpendReportCall(
         accessToken,
@@ -128,10 +134,10 @@ const CustomersSpendPanel: React.FC<CustomersSpendPanelProps> = ({
       <div className="mb-6 flex gap-4 items-end">
         <div>
           <Text className="mb-2 font-medium">Date Range</Text>
-          <RangePicker
+          <DateRangePicker
             value={dateRange}
-            onChange={(dates) => setDateRange(dates as [Dayjs | null, Dayjs | null])}
-            format="YYYY-MM-DD"
+            onValueChange={setDateRange}
+            enableSelect={false}
           />
         </div>
         <Button onClick={fetchSpendReport} disabled={loading}>
