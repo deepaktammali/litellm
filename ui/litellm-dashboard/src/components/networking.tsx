@@ -2431,6 +2431,49 @@ export const allEndUsersCall = async (accessToken: string) => {
   }
 };
 
+export const customerSpendReportCall = async (
+  accessToken: string,
+  startDate?: string,
+  endDate?: string,
+  endUserId?: string,
+) => {
+  try {
+    let url = proxyBaseUrl ? `${proxyBaseUrl}/customer/spend/report` : `/customer/spend/report`;
+
+    // Build query parameters
+    const queryParams = new URLSearchParams();
+    if (startDate) queryParams.append("start_date", startDate);
+    if (endDate) queryParams.append("end_date", endDate);
+    if (endUserId) queryParams.append("end_user_id", endUserId);
+
+    if (queryParams.toString()) {
+      url += `?${queryParams.toString()}`;
+    }
+
+    console.log("in customer/spend/report", url);
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        [globalLitellmHeaderName]: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!response.ok) {
+      const errorData = await response.json();
+      const errorMessage = deriveErrorMessage(errorData);
+      handleError(errorMessage);
+      throw new Error(errorMessage);
+    }
+
+    const data = await response.json();
+    console.log(data);
+    return data;
+  } catch (error) {
+    console.error("Failed to fetch customer spend report:", error);
+    throw error;
+  }
+};
+
 export const userFilterUICall = async (accessToken: string, params: URLSearchParams) => {
   try {
     let url = proxyBaseUrl ? `${proxyBaseUrl}/user/filter/ui` : `/user/filter/ui`;
